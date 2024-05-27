@@ -28,10 +28,12 @@ public interface BaseEnum {
      * @return 如果相等返回true，否则返回false。当传入的值为null时，总是返回false。
      */
     default boolean equalsValue(Integer value) {
-        if (value == null) { // 检查传入的value是否为null
+        // 检查传入的value是否为null
+        if (value == null) {
             return false;
         }
-        return getValue() == value; // 比较当前对象的值和传入的值是否相等
+        // 比较当前对象的值和传入的值是否相等
+        return getValue() == value;
     }
 
 }

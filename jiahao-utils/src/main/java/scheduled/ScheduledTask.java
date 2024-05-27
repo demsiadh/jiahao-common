@@ -19,6 +19,4 @@ public class ScheduledTask {
     private Runnable runnable;
     // 任务id
     private String taskId;
-    // 间隔时间
-    private long delay;
 }

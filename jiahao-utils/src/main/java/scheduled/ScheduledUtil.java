@@ -2,8 +2,10 @@ package scheduled;
 
 import jodd.util.concurrent.ThreadFactoryBuilder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
+import javax.annotation.Resource;
 import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -17,7 +19,10 @@ import java.util.function.Supplier;
  * @data 2024/5/10 下午4:11
  */
 @Slf4j
+@Component
 public class ScheduledUtil {
+    @Resource
+    private ScheduleConfig scheduleConfig;
     private static ScheduledExecutorService service;
     // 任务集合
     private static final Map<String, ScheduledFuture<?>> FUTURE_MAP = new ConcurrentHashMap<>();
@@ -34,16 +39,9 @@ public class ScheduledUtil {
             Boolean apply = supplier.get();
             // 如果执行失败就重试
             if (!apply) {
-                LocalDateTime localDateTime = LocalDateTime.now();
-                Runnable runnable = () -> {
-                    log.info("{} task fail, retry", taskId);
-                    // 重试结果
-                    Boolean retryResult = supplier.get();
-                    if (retryResult || LocalDateTime.now().getHour() - localDateTime.getHour() >= ScheduledConstants.DAY_SCHEDULE_DURATION_HOUR) {
-                        remove(taskId);
-                    }
-                };
-                addTask(new ScheduledTask(runnable, taskId, ScheduledConstants.DAY_SCHEDULE_INTERVAL));
+                LocalDateTime deadlineTime = LocalDateTime.now().plusSeconds(scheduleConfig.getMaxRetryIntervalUnit().toSeconds(scheduleConfig.getMaxRetryInterval()));
+                Runnable runnable = new ScheduledRunnable(taskId, supplier, deadlineTime);
+                addTask(new ScheduledTask(runnable, taskId));
             }
         } catch (Exception e) {
             log.error("{} task fail Exception: {}", taskId, e.toString());
@@ -68,16 +66,15 @@ public class ScheduledUtil {
      * 添加定时任务（一定时间后重新执行）
      * @param retryTask  需要重试的任务对象
      */
-    public void addTask(ScheduledTask retryTask) {
+    private void addTask(ScheduledTask retryTask) {
         // 如果重试任务已经在map中则直接返回
         if (FUTURE_MAP.get(retryTask.getTaskId()) != null) {
             log.error("ScheduledService add task Failed! {} task already exist", retryTask.getTaskId());
             return;
         }
-
         // 将任务添加到定时服务中
-        ScheduledFuture<?> scheduledFuture = service.scheduleWithFixedDelay(retryTask.getRunnable(), retryTask.getDelay(),
-                retryTask.getDelay(), TimeUnit.SECONDS);
+        ScheduledFuture<?> scheduledFuture = service.scheduleWithFixedDelay(retryTask.getRunnable(), scheduleConfig.getRetryInterval(),
+                scheduleConfig.getRetryInterval(), scheduleConfig.getRetryIntervalUnit());
 
         // 将任务添加到重试任务中
         FUTURE_MAP.put(retryTask.getTaskId(), scheduledFuture);
@@ -89,7 +86,7 @@ public class ScheduledUtil {
      * 根据taskId 移除定时任务
      * @param taskId 任务id
      */
-    public void remove(String taskId) {
+    private void remove(String taskId) {
         if (FUTURE_MAP.get(taskId) == null) {
             log.error("ScheduledService remove task Failed! {} task not exist", taskId);
             return;
@@ -110,20 +107,41 @@ public class ScheduledUtil {
      * @param supplier 执行任务的方法
      */
     public void getSupplier(String taskId, Supplier<Boolean> supplier) {
-        new Thread(() -> cff.accept(taskId, supplier)).start();
-    }
-
-    /**
-     * 重试的定时任务(线程池版)
-     * @param taskId 任务id
-     * @param supplier 执行任务的方法
-     */
-    public void getSupplierByPool(String taskId, Supplier<Boolean> supplier){
         THREAD_POOL_EXECUTOR.execute(()-> cff.accept(taskId,supplier));
     }
 
     // 消费者接口
     private interface DConsumer<T, R> {
         void accept(T t, R r);
+    }
+
+    private class ScheduledRunnable implements Runnable{
+        private int retryTimes;
+        private final String taskId;
+        private final Supplier<Boolean> supplier;
+        private final LocalDateTime deadlineTime;
+        public ScheduledRunnable(String taskId, Supplier<Boolean> supplier, LocalDateTime deadlineTime) {
+            this.taskId = taskId;
+            this.supplier = supplier;
+            this.deadlineTime = deadlineTime;
+            retryTimes = 0;
+        }
+        @Override
+        public void run() {
+            // 如果重试次数超过最大次数或者超过最大重试时间则移除任务
+            if (retryTimes++ >= scheduleConfig.getMaxRetryTimes()) {
+                remove(taskId);
+                log.error("{} task retry times is over max retry times!", taskId);
+            }else if (LocalDateTime.now().isAfter(deadlineTime)) {
+                remove(taskId);
+                log.error("{} task retry times is over deadline time!", taskId);
+            }
+            log.info("{} task retry", taskId);
+            // 执行任务
+            boolean retryResult = supplier.get();
+            if (retryResult) {
+                remove(taskId);
+            }
+        }
     }
 }
