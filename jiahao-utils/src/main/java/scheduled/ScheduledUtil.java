@@ -44,9 +44,21 @@ public class ScheduledUtil {
                 addTask(new ScheduledTask(runnable, taskId));
             }
         } catch (Exception e) {
-            log.error("{} task fail Exception: {}", taskId, e.toString());
+            log.error("{} task fail Exception: {}", taskId, e.toString(), e);
         }
         log.info("{} task finish!", taskId);
+    };
+
+    // 处理无返回值任务的消费者
+    private final DConsumer<String, Runnable> vff = (taskId, runnable) -> {
+        log.info("{} task start", taskId);
+        try {
+            runnable.run();
+        }catch (Exception e) {
+            log.error("{} task fail Exception: {}", taskId, e.toString(), e);
+        }finally {
+            log.info("{} task finish!", taskId);
+        }
     };
 
     @PostConstruct
@@ -110,6 +122,15 @@ public class ScheduledUtil {
         THREAD_POOL_EXECUTOR.execute(()-> cff.accept(taskId,supplier));
     }
 
+    /**
+     * 执行无返回值的定时任务（不会失败重试）
+     * @param taskId   任务id
+     * @param runnable 执行任务的方法
+     */
+    public void getRunnable(String taskId, Runnable runnable) {
+        THREAD_POOL_EXECUTOR.execute(()-> vff.accept(taskId,runnable));
+    }
+
     // 消费者接口
     private interface DConsumer<T, R> {
         void accept(T t, R r);
@@ -132,9 +153,11 @@ public class ScheduledUtil {
             if (retryTimes++ >= scheduleConfig.getMaxRetryTimes()) {
                 remove(taskId);
                 log.error("{} task retry times is over max retry times!", taskId);
+                return;
             }else if (LocalDateTime.now().isAfter(deadlineTime)) {
                 remove(taskId);
                 log.error("{} task retry times is over deadline time!", taskId);
+                return;
             }
             log.info("{} task retry", taskId);
             // 执行任务
