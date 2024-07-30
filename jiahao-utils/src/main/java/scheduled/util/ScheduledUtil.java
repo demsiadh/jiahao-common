@@ -1,12 +1,14 @@
-package scheduled;
+package scheduled.util;
 
 import cn.hutool.core.date.LocalDateTimeUtil;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import scheduled.config.ScheduleConfig;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.io.Serializable;
 import java.time.LocalDateTime;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -35,49 +37,40 @@ public class ScheduledUtil {
     private static final Map<String, Long> TASK_TIME_MAP = new ConcurrentHashMap<>();
     // 快速线程池，用来处理执行时间小于10s的任务（为了区分长任务和短任务）
     private static final ThreadPoolExecutor QUICK_HANDLER_EXECUTOR = new ThreadPoolExecutor(2, 4, 30,
-            TimeUnit.SECONDS, new LinkedBlockingDeque<>(500),
+            TimeUnit.SECONDS, new ResizeLinkedBlockingQueue<>(500),
             new ThreadFactoryBuilder().setNameFormat("quickHandler-pool-%d").setDaemon(true).build(),
-            new ThreadPoolExecutor.CallerRunsPolicy());
+            new ScheduleRejected());
     // 标准线程池，执行长任务，并且在开机时执行所有任务并统计时间
     private static final ThreadPoolExecutor THREAD_POOL_EXECUTOR = new ThreadPoolExecutor(2, 5, 30,
-            TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(500),
+            TimeUnit.SECONDS, new ResizeLinkedBlockingQueue<>(500),
             new ThreadFactoryBuilder().setNameFormat("standardHandler-pool-%d").setDaemon(true).build(),
-            new ThreadPoolExecutor.CallerRunsPolicy());
-
+            new ScheduleRejected());
+    public static ThreadPoolExecutor getThreadPoolExecutor() {
+        return THREAD_POOL_EXECUTOR;
+    }
+    public static ThreadPoolExecutor getQuickHandlerExecutor() {
+        return QUICK_HANDLER_EXECUTOR;
+    }
     // 消费者
-    private final DConsumer<String, Supplier<Boolean>> cff = (taskId, supplier) -> {
+    private final DConsumer<String, ScheduledRunnable> cff = (taskId, scheduledRunnable) -> {
         LocalDateTime startTime = LocalDateTime.now();
         log.info("{} task start", taskId);
         try {
             // 接受任务执行的返回值
-            Boolean apply = supplier.get();
+            Boolean apply = scheduledRunnable.supplier.get();
             // 如果执行失败就重试
             if (!apply) {
-                LocalDateTime deadlineTime = startTime.plusSeconds(scheduleConfig.getMaxRetryIntervalUnit().toSeconds(scheduleConfig.getMaxRetryInterval()));
-                Runnable runnable = new ScheduledRunnable(taskId, supplier, deadlineTime);
-                addTask(new ScheduledTask(runnable, taskId));
+                addTask(scheduledRunnable);
             }
         } catch (Exception e) {
             log.error("{} task fail Exception: {}", taskId, e.getMessage(), e);
         }finally {
             log.info("{} task finish!", taskId);
+            // 记录当前任务执行时间
             TASK_TIME_MAP.put(taskId, LocalDateTimeUtil.between(startTime, LocalDateTime.now()).getSeconds());
         }
     };
 
-    // 处理无返回值任务的消费者
-    private final DConsumer<String, Runnable> vff = (taskId, runnable) -> {
-        LocalDateTime startTime = LocalDateTime.now();
-        log.info("{} task start", taskId);
-        try {
-            runnable.run();
-        } catch (Exception e) {
-            log.error("{} task fail Exception: {}", taskId, e.getMessage(), e);
-        } finally {
-            log.info("{} task finish!", taskId);
-            TASK_TIME_MAP.put(taskId, LocalDateTimeUtil.between(startTime, LocalDateTime.now()).getSeconds());
-        }
-    };
 
     @PostConstruct
     public void init() {
@@ -97,18 +90,18 @@ public class ScheduledUtil {
      *
      * @param retryTask 需要重试的任务对象
      */
-    private void addTask(ScheduledTask retryTask) {
+    private void addTask(ScheduledRunnable retryTask) {
         // 如果重试任务已经在map中则直接返回
-        if (FUTURE_MAP.get(retryTask.getTaskId()) != null) {
-            log.error("ScheduledService add task Failed! {} task already exist", retryTask.getTaskId());
+        if (FUTURE_MAP.get(retryTask.taskId) != null) {
+            log.error("ScheduledService add task Failed! {} task already exist", retryTask.taskId);
             return;
         }
         // 将任务添加到定时服务中
-        ScheduledFuture<?> scheduledFuture = service.scheduleWithFixedDelay(retryTask.getRunnable(), scheduleConfig.getRetryInterval(),
+        ScheduledFuture<?> scheduledFuture = service.scheduleWithFixedDelay(retryTask, scheduleConfig.getRetryInterval(),
                 scheduleConfig.getRetryInterval(), scheduleConfig.getRetryIntervalUnit());
 
         // 将任务添加到重试任务中
-        FUTURE_MAP.put(retryTask.getTaskId(), scheduledFuture);
+        FUTURE_MAP.put(retryTask.taskId, scheduledFuture);
     }
 
 
@@ -139,35 +132,23 @@ public class ScheduledUtil {
      * @param supplier 执行任务的方法
      */
     public void getSupplier(String taskId, Supplier<Boolean> supplier) {
+        // 创建重试任务
+        ScheduledRunnable scheduledRunnable = new ScheduledRunnable(taskId, supplier, LocalDateTime.now().plusSeconds(scheduleConfig.getMaxRetryIntervalUnit().toSeconds(scheduleConfig.getMaxRetryInterval())));
         // 如果执行时间小于10s，放到快速线程池中
         if (TASK_TIME_MAP.getOrDefault(taskId, DEFAULT_TIME) <= MAX_TIME) {
-            QUICK_HANDLER_EXECUTOR.execute(() -> cff.accept(taskId, supplier));
+            QUICK_HANDLER_EXECUTOR.execute(() -> cff.accept(taskId, scheduledRunnable));
         }else {
-            THREAD_POOL_EXECUTOR.execute(() -> cff.accept(taskId, supplier));
+            THREAD_POOL_EXECUTOR.execute(() -> cff.accept(taskId, scheduledRunnable));
         }
     }
 
-    /**
-     * 执行无返回值的定时任务（不会失败重试）
-     *
-     * @param taskId   任务id
-     * @param runnable 执行任务的方法
-     */
-    public void getRunnable(String taskId, Runnable runnable) {
-        // 如果执行时间小于10s，放到快速线程池中
-        if (TASK_TIME_MAP.getOrDefault(taskId, DEFAULT_TIME) <= MAX_TIME) {
-            QUICK_HANDLER_EXECUTOR.execute(() -> vff.accept(taskId, runnable));
-        }else {
-            THREAD_POOL_EXECUTOR.execute(() -> vff.accept(taskId, runnable));
-        }
-    }
 
     // 消费者接口
     private interface DConsumer<T, R> {
         void accept(T t, R r);
     }
 
-    private class ScheduledRunnable implements Runnable {
+    public class ScheduledRunnable implements Runnable, Serializable {
         private int retryTimes;
         private final String taskId;
         private final Supplier<Boolean> supplier;
@@ -179,7 +160,6 @@ public class ScheduledUtil {
             this.deadlineTime = deadlineTime;
             retryTimes = 0;
         }
-
         @Override
         public void run() {
             // 如果重试次数超过最大次数或者超过最大重试时间则移除任务
@@ -193,7 +173,7 @@ public class ScheduledUtil {
                 return;
             }
             log.info("{} task retry", taskId);
-            // 执行任务
+            // 执行任务 如果执行成功则移除任务
             boolean retryResult = supplier.get();
             if (retryResult) {
                 remove(taskId);

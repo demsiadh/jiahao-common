@@ -20,8 +20,8 @@
     </modules>
 
     <properties>
-        <maven.compiler.source>17</maven.compiler.source>
-        <maven.compiler.target>17</maven.compiler.target>
+        <maven.compiler.source>8</maven.compiler.source>
+        <maven.compiler.target>8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <redisson.version>3.16.2</redisson.version>
         <aspectj.version>1.9.6</aspectj.version>
@@ -31,6 +31,7 @@
         <mybatis-plus.version>3.4.3</mybatis-plus.version>
         <hutool.version>5.8.10</hutool.version>
         <guava.version>27.1-jre</guava.version>
+        <kryo.version>4.0.3</kryo.version>
     </properties>
 
     <dependencies>
@@ -79,6 +80,11 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.esotericsoftware</groupId>
+            <artifactId>kryo-shaded</artifactId>
+            <version>${kryo.version}</version>
         </dependency>
     </dependencies>
     <dependencyManagement>
