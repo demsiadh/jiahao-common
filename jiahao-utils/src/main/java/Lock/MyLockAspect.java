@@ -40,7 +40,7 @@ public class MyLockAspect {
         RLock lock = myLockFactory.getLock(myLock.lockType(), name);
 
         boolean isLock = myLock.lockStrategy().tryLock(lock, myLock);
-        if (isLock) {
+        if (!isLock) {
             return null;
         }
 
